@@ -109,6 +109,20 @@ def getTimeStamps(chart_lab_events, con):
 	gap_in_hours = gap.days*24+gap.seconds//3600
 	return pd.Series([min_time+hour*i for i in range(gap_in_hours+1)])
 
+def populateColumn(column, chart_lab_events, itemids, time_series):
+	values = chart_lab_events[chart_lab_events['itemid'].isin(itemids)]
+	def getValueForTimestamp(row):
+		time = row['Time']
+		# get value within one hour
+		half_hour = datetime.timedelta(minutes=30)
+		values_within_one_hour = values[(values['charttime']-time <= half_hour) & (time-values['charttime'] <= half_hour)]
+		if len(values_within_one_hour):
+			return values_within_one_hour['valuenum'].mean()
+		# fill nan later
+		return None
+	time_series[column] = time_series.apply(getValueForTimestamp, axis=1)
+	time_series[column].fillna(method='ffill', inplace=True)
+	time_series[column].fillna(method='backfill', inplace=True)
 
 def getICUStayTimeSeries(patient_stay, con):
 	icustay_id = patient_stay['icustay_id']
@@ -117,4 +131,19 @@ def getICUStayTimeSeries(patient_stay, con):
 	chart_lab_events = chart_lab_events[(chart_lab_events['charttime'] >= patient_stay['intime']) & (chart_lab_events['charttime'] <= patient_stay['outtime'])]
 	chart_lab_events['charttime_nearest_hour'] = chart_lab_events['charttime'].apply(lambda dt: datetime.datetime(dt.year, dt.month, dt.day, dt.hour if dt.minute <= 30 else dt.hour+1))
 	time_series = pd.DataFrame({'Time': getTimeStamps(chart_lab_events, con)})
+	populateColumn('SpO2', chart_lab_events, [646, 834, 220277], time_series)
+	populateColumn('Temperature', chart_lab_events, [50825, 676, 677], time_series)
+	populateColumn('Heart Rate', chart_lab_events, [211, 220045], time_series)
+	populateColumn('CVP', chart_lab_events, [113, 220074], time_series)
+	populateColumn('Hematocrit', chart_lab_events, [51221], time_series)
+	populateColumn('Potassium', chart_lab_events, [50971], time_series)
+	populateColumn('Sodium', chart_lab_events, [50983], time_series)
+	populateColumn('Creatinine', chart_lab_events, [50912], time_series)
+	populateColumn('Chloride', chart_lab_events, [50902], time_series)
+	populateColumn('Urea Nitrogen', chart_lab_events, [51006], time_series)
+	populateColumn('Platelet Count', chart_lab_events, [51265], time_series)
+	populateColumn('White Blood Cells', chart_lab_events, [51301], time_series)
+	populateColumn('Red Blood Cells', chart_lab_events, [51279], time_series)
+	populateColumn('Calculated Total CO2', chart_lab_events, [50804], time_series)
+	populateColumn('pH', chart_lab_events, [50820], time_series)
 	return time_series
