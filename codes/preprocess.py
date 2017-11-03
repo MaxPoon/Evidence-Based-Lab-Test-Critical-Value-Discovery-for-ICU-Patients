@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import datetime
 
 itemidToMeasurement = {
 	211: 'Heart Rate',
@@ -98,8 +99,22 @@ def getAllEvents(hadm_id, con):
 		""".format(hadm_id=hadm_id), con=con)
 	return chart_lab_events, procedures
 
+def getTimeStamps(chart_lab_events, con):
+	min_time = chart_lab_events['charttime'].min()
+	max_time = chart_lab_events['charttime'].max()
+	min_time = datetime.datetime(min_time.year, min_time.month, min_time.day, min_time.hour if min_time.minute == 0 else min_time.hour+1)
+	max_time = datetime.datetime(max_time.year, max_time.month, max_time.day, max_time.hour if max_time.minute == 0 else max_time.hour+1)
+	hour = datetime.timedelta(hours=1)
+	gap = max_time - min_time
+	gap_in_hours = gap.days*24+gap.seconds//3600
+	return pd.Series([min_time+hour*i for i in range(gap_in_hours+1)])
+
+
 def getICUStayTimeSeries(patient_stay, con):
 	icustay_id = patient_stay['icustay_id']
 	hadm_id = patient_stay['hadm_id']
 	chart_lab_events, procedures = getAllEvents(hadm_id, con)
-	
+	chart_lab_events = chart_lab_events[(chart_lab_events['charttime'] >= patient_stay['intime']) & (chart_lab_events['charttime'] <= patient_stay['outtime'])]
+	chart_lab_events['charttime_nearest_hour'] = chart_lab_events['charttime'].apply(lambda dt: datetime.datetime(dt.year, dt.month, dt.day, dt.hour if dt.minute <= 30 else dt.hour+1))
+	time_series = pd.DataFrame({'Time': getTimeStamps(chart_lab_events, con)})
+	return time_series
