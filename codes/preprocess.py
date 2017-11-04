@@ -102,7 +102,7 @@ def getAllEvents(hadm_id, con):
 def getTimeStamps(chart_lab_events, con):
 	min_time = chart_lab_events['charttime'].min()
 	max_time = chart_lab_events['charttime'].max()
-	min_time = datetime.datetime(min_time.year, min_time.month, min_time.day, min_time.hour if min_time.minute == 0 else min_time.hour+1)
+	min_time = datetime.datetime(min_time.year, min_time.month, min_time.day, min_time.hour)
 	max_time = datetime.datetime(max_time.year, max_time.month, max_time.day, max_time.hour if max_time.minute == 0 else max_time.hour+1)
 	hour = datetime.timedelta(hours=1)
 	gap = max_time - min_time
@@ -111,6 +111,7 @@ def getTimeStamps(chart_lab_events, con):
 
 def populateColumn(column, chart_lab_events, itemids, time_series):
 	values = chart_lab_events[chart_lab_events['itemid'].isin(itemids)]
+	values = values.sort_values('charttime')
 	def getValueForTimestamp(row):
 		time = row['Time']
 		# get value within one hour
@@ -120,7 +121,25 @@ def populateColumn(column, chart_lab_events, itemids, time_series):
 			return values_within_one_hour['valuenum'].mean()
 		# fill nan later
 		return None
-	time_series[column] = time_series.apply(getValueForTimestamp, axis=1)
+	i = 0
+	half_hour = datetime.timedelta(minutes=30)
+	column_values = []
+	for time in time_series['Time']:
+		values_within_one_hour = []
+		while i < len(values):
+			time_of_value = values.iloc[i]['charttime']
+			if time_of_value >= time + half_hour:
+				break
+			if time_of_value >= time - half_hour:
+				values_within_one_hour.append(values.iloc[i]['valuenum'])
+			i += 1
+		if values_within_one_hour:
+			column_values.append(sum(values_within_one_hour)/len(values_within_one_hour))
+		else:
+			# fill na later
+			column_values.append(None)
+	time_series[column] = pd.Series(column_values)
+	# fill na
 	time_series[column].fillna(method='ffill', inplace=True)
 	time_series[column].fillna(method='backfill', inplace=True)
 
