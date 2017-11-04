@@ -1,7 +1,9 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from connection import *
 import datetime
+import sys
 
 itemidToMeasurement = {
 	211: 'Heart Rate',
@@ -32,7 +34,14 @@ itemidToLabEvent = {
 	50825: 'Temperature'
 }
 
-def getICUStayPatients(con, force_reload=False):
+engine = getEngine()
+# sorry for this, we need to set schema this way
+df = pd.read_sql_query("""
+	set search_path to mimiciii;
+	SELECT COUNT(*) FROM patients;
+	""", con=engine)
+
+def getICUStayPatients(con=engine, force_reload=False):
 	icustays_filepath = './selected_stays.csv'
 	icustays_file = Path(icustays_filepath)
 	if not force_reload and icustays_file.is_file():
@@ -76,7 +85,7 @@ def getICUStayPatients(con, force_reload=False):
 	icustays.to_csv(icustays_filepath, index=False)
 	return icustays
 
-def getAllEvents(hadm_id, con):
+def getAllEvents(hadm_id, con=engine):
 	labevent_ids = [51221, 50971, 50983, 50912, 50902, 51006, 51265, 51265, 51301, 51279, 50804, 50825, 50820]
 	labevent_ids_str = '(' + ','.join(list(map(str, labevent_ids))) +')'
 	chartevent_ids = [211, 646, 834, 618, 220277, 220210, 220045, 220074, 113, 677, 678]
@@ -99,11 +108,13 @@ def getAllEvents(hadm_id, con):
 		""".format(hadm_id=hadm_id), con=con)
 	return chart_lab_events, procedures
 
-def getTimeStamps(chart_lab_events, con):
+def getTimeStamps(chart_lab_events, con=engine):
 	min_time = chart_lab_events['charttime'].min()
 	max_time = chart_lab_events['charttime'].max()
+	if max_time.minute != 0:
+		max_time += datetime.timedelta(hours=1)
 	min_time = datetime.datetime(min_time.year, min_time.month, min_time.day, min_time.hour)
-	max_time = datetime.datetime(max_time.year, max_time.month, max_time.day, max_time.hour if max_time.minute == 0 else max_time.hour+1)
+	max_time = datetime.datetime(max_time.year, max_time.month, max_time.day, max_time.hour)
 	hour = datetime.timedelta(hours=1)
 	gap = max_time - min_time
 	gap_in_hours = gap.days*24+gap.seconds//3600
@@ -140,16 +151,33 @@ def populateColumn(column, chart_lab_events, itemids, time_series):
 			column_values.append(None)
 	time_series[column] = pd.Series(column_values)
 	# fill na
+	time_series[column].interpolate(method='ffill', inplace=True)
 	time_series[column].fillna(method='ffill', inplace=True)
 	time_series[column].fillna(method='backfill', inplace=True)
 
-def getICUStayTimeSeries(patient_stay, con):
+def populateProcedure(procedure, procedures, itemid, time_series):
+	intervals = procedures[procedures['itemid']==itemid][['starttime', 'endtime']]
+	prediction_period = datetime.timedelta(hours=4)
+	intervals = [(interval['starttime']-prediction_period, interval['endtime']) for _, interval in intervals.iterrows()]
+	def findProcedure(row):
+		time = row['Time']
+		for interval in intervals:
+			if time >= interval[0] and time <= interval[1]:
+				return 1
+		return 0
+	time_series['Need' + procedure] = time_series.apply(findProcedure, axis=1)
+
+def getICUStayTimeSeries(patient_stay, con=engine):
 	icustay_id = patient_stay['icustay_id']
 	hadm_id = patient_stay['hadm_id']
 	chart_lab_events, procedures = getAllEvents(hadm_id, con)
 	chart_lab_events = chart_lab_events[(chart_lab_events['charttime'] >= patient_stay['intime']) & (chart_lab_events['charttime'] <= patient_stay['outtime'])]
-	chart_lab_events['charttime_nearest_hour'] = chart_lab_events['charttime'].apply(lambda dt: datetime.datetime(dt.year, dt.month, dt.day, dt.hour if dt.minute <= 30 else dt.hour+1))
 	time_series = pd.DataFrame({'Time': getTimeStamps(chart_lab_events, con)})
+	# add static values
+	time_series['icustay_id'] = pd.Series([patient_stay['icustay_id']]*len(time_series))
+	time_series['age'] = pd.Series([patient_stay['age']]*len(time_series))
+	time_series['gender'] = pd.Series([patient_stay['gender']]*len(time_series))
+	# add features
 	populateColumn('SpO2', chart_lab_events, [646, 834, 220277], time_series)
 	populateColumn('Temperature', chart_lab_events, [50825, 676, 677], time_series)
 	populateColumn('Heart Rate', chart_lab_events, [211, 220045], time_series)
@@ -165,4 +193,34 @@ def getICUStayTimeSeries(patient_stay, con):
 	populateColumn('Red Blood Cells', chart_lab_events, [51279], time_series)
 	populateColumn('Calculated Total CO2', chart_lab_events, [50804], time_series)
 	populateColumn('pH', chart_lab_events, [50820], time_series)
+	# add expected values
+	populateProcedure('Invasive Ventilation', procedures, 225792, time_series)
+	populateProcedure('Non-invasive Ventilation', procedures, 225794, time_series)
 	return time_series
+
+def getAllPatientsTimeSeries(icustays, force_reload=False, save_file=True):
+	time_series_filename = './time_series.csv'
+	time_series_file = Path(time_series_filename)
+	if not force_reload and time_series_file.is_file():
+		all_time_series_concat = pd.read_csv(time_series_filename)
+		all_time_series = []
+		for icustay_id, time_series in all_time_series_concat.groupby('icustay_id'):
+			time_series['icustay_id'] = pd.Series([icustay_id]*len(time_series))
+			all_time_series.append(time_series.sort_values('Time'))
+		return all_time_series
+	all_time_series = [None]*len(icustays)
+	for i, stay in icustays.iterrows():
+		all_time_series[i] = getICUStayTimeSeries(stay)
+		if (i+1)%100==0:
+			print("Extract time series for {i} patients.\nTotal size: {size}".format(
+				i=i+1,
+				size=sum(list(map(sys.getsizeof, all_time_series)))))
+	if save_file:
+		all_time_series_concat = pd.concat(all_time_series)
+		all_time_series_concat.to_csv(time_series_filename, index=False)
+	return all_time_series
+
+if __name__ == "__main__":
+	stays = getICUStayPatients()
+	getAllPatientsTimeSeries(stays)
+	print("Extract time series for {num} patients".format(num=len(stays)))
