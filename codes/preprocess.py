@@ -19,6 +19,32 @@ itemidToMeasurement = {
 	676: 'Temperature C'
 }
 
+meanValues = {
+	211: 102.662588,
+	220045: 102.662588,
+	646: 98.395889,
+	834: 98.395889,
+	220277: 98.395889,
+	618: 20.48657,
+	220210: 20.48657,
+	113: 15.5817,
+	220074: 15.5817,
+	676: 37.1698,
+	677: 37.1698,
+	50825: 37.1698,
+	51279: 3.510,
+	50983: 138.555,
+	50971: 4.154,
+	51006: 29.256,
+	50804: 26.041,
+	50902: 103.479,
+	51221: 31.219,
+	50912: 1.56298,
+	50820: 7.379,
+	51265: 239.319,
+	51301: 10.504
+}
+
 itemidToLabEvent = {
 	51221: 'Hematocrit',
 	50971: 'Potassium',
@@ -62,19 +88,21 @@ def getICUStayPatients(con=engine, force_reload=False):
 	# create stay count filter
 	stay_count_filter = pd.read_sql_query('SELECT hadm_id FROM icustays GROUP BY hadm_id HAVING COUNT(1)=1;', con=con)
 	# create chartevent filters
-	oxygen_filter = pd.read_sql_query('SELECT DISTINCT hadm_id FROM chartevents WHERE itemid=646 OR itemid=834 OR itemid=220277 AND valuenum IS NOT NULL;', con=con)
-	heartrate_filter = pd.read_sql_query('SELECT DISTINCT hadm_id FROM chartevents WHERE itemid=211 OR itemid=220045 AND valuenum IS NOT NULL;', con=con)
-	cvp_filter = pd.read_sql_query('SELECT DISTINCT hadm_id FROM chartevents WHERE itemid=113 OR itemid=220074 AND valuenum IS NOT NULL;', con=con)
-	respiratory_filter = pd.read_sql_query('SELECT DISTINCT hadm_id FROM chartevents WHERE itemid=618 OR itemid=220210 AND valuenum IS NOT NULL;', con=con)
+	oxygen_filter = pd.read_sql_query('SELECT DISTINCT hadm_id FROM chartevents WHERE itemid=646 OR itemid=834 OR itemid=220277 AND valuenum IS NOT NULL AND valuenum<{mean}*4 AND valuenum>{mean}*0.25;'.format(mean=98.395889), con=con)
+	heartrate_filter = pd.read_sql_query('SELECT DISTINCT hadm_id FROM chartevents WHERE itemid=211 OR itemid=220045 AND valuenum IS NOT NULL AND valuenum<{mean}*4 AND valuenum>{mean}*0.25;'.format(mean=102.662588), con=con)
+	cvp_filter = pd.read_sql_query('SELECT DISTINCT hadm_id FROM chartevents WHERE itemid=113 OR itemid=220074 AND valuenum IS NOT NULL AND valuenum<{mean}*4 AND valuenum>{mean}*0.25;'.format(mean=15.5817), con=con)
+	respiratory_filter = pd.read_sql_query('SELECT DISTINCT hadm_id FROM chartevents WHERE itemid=618 OR itemid=220210 AND valuenum IS NOT NULL AND valuenum<{mean}*4 AND valuenum>{mean}*0.25;'.format(mean=20.48657), con=con)
 	# create labevent filters
 	selected_labitems = [51221, 50971, 50983, 50912, 50902, 51006, 51265, 51265, 51301, 51279, 50804, 50820]
-	lab_filters = [pd.read_sql_query('SELECT DISTINCT hadm_id FROM labevents WHERE itemid={itemid} AND valuenum IS NOT NULL;'.format(itemid=itemid), con=con) for itemid in selected_labitems]
+	lab_filters = [pd.read_sql_query('SELECT DISTINCT hadm_id FROM labevents WHERE itemid={itemid} AND valuenum IS NOT NULL AND valuenum<{mean}*4 AND valuenum>{mean}*0.25;'.format(mean=meanValues[itemid], itemid=itemid), con=con) for itemid in selected_labitems]
 	# create temperature event filters
 	temp_filter = pd.read_sql_query("""
 		SELECT DISTINCT hadm_id FROM chartevents WHERE itemid=676 OR itemid=677 AND valuenum IS NOT NULL
+		AND valuenum<{mean}*4 AND valuenum>{mean}*0.25
 		UNION
-		SELECT DISTINCT hadm_id FROM labevents WHERE itemid=50825 AND valuenum IS NOT NULL;
-		""", con=con)
+		SELECT DISTINCT hadm_id FROM labevents WHERE itemid=50825 AND valuenum IS NOT NULL
+		AND valuenum<{mean}*4 AND valuenum>{mean}*0.25;
+		""".format(mean=37.1698), con=con)
 	filters = [stay_count_filter, oxygen_filter, heartrate_filter, cvp_filter, respiratory_filter, temp_filter] + lab_filters
 	# filter the icustays with filters
 	for feature_filter in filters:
@@ -122,6 +150,7 @@ def getTimeStamps(chart_lab_events, con=engine):
 
 def populateColumn(column, chart_lab_events, itemids, time_series):
 	values = chart_lab_events[chart_lab_events['itemid'].isin(itemids)]
+	values = values[(values['valuenum']<meanValues[itemids[0]]*4) & (values['valuenum']>meanValues[itemids[0]]*0.25)]
 	values = values.sort_values('charttime')
 	def getValueForTimestamp(row):
 		time = row['Time']
@@ -178,6 +207,7 @@ def getICUStayTimeSeries(patient_stay, con=engine):
 	time_series['age'] = pd.Series([patient_stay['age']]*len(time_series))
 	time_series['gender'] = pd.Series([patient_stay['gender']]*len(time_series))
 	# add features
+	populateColumn('Respiratory Rate', chart_lab_events, [618, 220210], time_series)
 	populateColumn('SpO2', chart_lab_events, [646, 834, 220277], time_series)
 	populateColumn('Temperature', chart_lab_events, [50825, 676, 677], time_series)
 	populateColumn('Heart Rate', chart_lab_events, [211, 220045], time_series)
@@ -203,10 +233,7 @@ def getAllPatientsTimeSeries(icustays, force_reload=False, save_file=True):
 	time_series_file = Path(time_series_filename)
 	if not force_reload and time_series_file.is_file():
 		all_time_series_concat = pd.read_csv(time_series_filename)
-		all_time_series = []
-		for icustay_id, time_series in all_time_series_concat.groupby('icustay_id'):
-			time_series['icustay_id'] = pd.Series([icustay_id]*len(time_series))
-			all_time_series.append(time_series.sort_values('Time'))
+		all_time_series = [time_series.sort_values('Time') for icustay_id, time_series in all_time_series_concat.groupby('icustay_id')]
 		return all_time_series
 	all_time_series = [None]*len(icustays)
 	for i, stay in icustays.iterrows():
@@ -220,7 +247,32 @@ def getAllPatientsTimeSeries(icustays, force_reload=False, save_file=True):
 		all_time_series_concat.to_csv(time_series_filename, index=False)
 	return all_time_series
 
+def normalizeTimeSeries(all_time_series, force_reload=False, save_file=True):
+	time_series_normalized_filename = './all_time_series_normalized.csv'
+	time_series_normalized_file = Path(time_series_normalized_filename)
+	if not force_reload and time_series_normalized_file.is_file():
+		all_time_series_concat = pd.read_csv(time_series_normalized_filename)
+	else:
+		all_time_series_concat = pd.concat(all_time_series)
+		features = ['age', 'Respiratory Rate', 'SpO2', 'Temperature', 'Heart Rate', 'CVP', 'Hematocrit', 'Potassium', 'Sodium', 'Creatinine', 'Chloride', 'Urea Nitrogen', 'Platelet Count', 'White Blood Cells', 'Red Blood Cells', 'Calculated Total CO2', 'pH']
+		for feature in features:
+			# min max normalization
+			min_value = all_time_series_concat[feature].min()
+			max_value = all_time_series_concat[feature].max()
+			all_time_series_concat[feature] = (all_time_series_concat[feature]-min_value)/(max_value-min_value)
+			# mean normalization
+			# all_time_series_concat[feature] = (all_time_series_concat[feature]-all_time_series_concat[feature].mean())/all_time_series_concat[feature].std()
+	all_time_series_normalized = []
+	for icustay_id, time_series in all_time_series_concat.groupby('icustay_id'):
+		all_time_series_normalized.append(time_series.sort_values('Time'))
+	if save_file:
+		all_time_series_concat.to_csv(time_series_normalized_filename, index=False)
+	return all_time_series_normalized
+
 if __name__ == "__main__":
 	stays = getICUStayPatients()
-	getAllPatientsTimeSeries(stays)
+	print("Select {n} icu stay patients".format(n=len(stays)))
+	all_time_series = getAllPatientsTimeSeries(stays)
 	print("Extract time series for {num} patients".format(num=len(stays)))
+	normalizeTimeSeries(all_time_series)
+	print("Normalized all data")
