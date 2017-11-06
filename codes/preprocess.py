@@ -256,6 +256,8 @@ def normalizeTimeSeries(all_time_series, force_reload=False, save_file=True):
 		all_time_series_concat = pd.concat(all_time_series)
 		features = ['age', 'Respiratory Rate', 'SpO2', 'Temperature', 'Heart Rate', 'CVP', 'Hematocrit', 'Potassium', 'Sodium', 'Creatinine', 'Chloride', 'Urea Nitrogen', 'Platelet Count', 'White Blood Cells', 'Red Blood Cells', 'Calculated Total CO2', 'pH']
 		for feature in features:
+			# drop rows with nan
+			all_time_series_concat = all_time_series_concat[pd.notnull(all_time_series_concat[feature])]
 			# min max normalization
 			min_value = all_time_series_concat[feature].min()
 			max_value = all_time_series_concat[feature].max()
@@ -274,5 +276,5 @@ if __name__ == "__main__":
 	print("Select {n} icu stay patients".format(n=len(stays)))
 	all_time_series = getAllPatientsTimeSeries(stays)
 	print("Extract time series for {num} patients".format(num=len(stays)))
-	normalizeTimeSeries(all_time_series)
-	print("Normalized all data")
+	all_time_series_normalized = normalizeTimeSeries(all_time_series)
+	print("Normalized data for {num} patients".format(num=len(all_time_series_normalized)))
